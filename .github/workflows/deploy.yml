@@ -29,13 +29,9 @@ jobs:
         npm run build --if-present
         npm run test --if-present
 
-    - name: Clean Vercel directory
-      run: rm -rf .vercel
-
     - name: Deploy to Vercel
-      uses: amondnet/vercel-action@v25
+      uses: vercel/actions/deploy-production@v5
       with:
         vercel-token: ${{ secrets.VERCEL_TOKEN }}
         vercel-org-id: ${{ secrets.VERCEL_ORG_ID }}
         vercel-project-id: ${{ secrets.VERCEL_PROJECT_ID }}
-        vercel-args: '--prod'
