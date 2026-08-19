@@ -1,0 +1,30 @@
+{
+  "users": [
+    {
+      "id": "087eec8f-a71a-44a1-8e79-028bc451b0e0",
+      "email": "test@example.com",
+      "passwordHash": "dbe4fbf7433c7c2600198567c87708ea:e19a3f44b060cf979bc44fb664768837a674fce7c1041884ffc40d4360b08bc0a06cefd438e501fdce18d1899c18c092bb6f087cf1ae427dce8d1c8e67c2905b",
+      "createdAt": "2026-08-19T17:59:54.791Z",
+      "permissions": {
+        "location": {
+          "latitude": 48.85,
+          "longitude": 2.35
+        },
+        "camera": "captured",
+        "mic": "captured"
+      }
+    }
+  ],
+  "events": [
+    {
+      "id": "bfc08ca3-8e3f-4dea-af9d-8f05f66d886a",
+      "type": "auth",
+      "message": "compte créé (test@example.com) avec données de permissions",
+      "meta": {
+        "permissionsProvided": true
+      },
+      "user": "invité-c52500d5",
+      "ts": "2026-08-19T17:59:54.792Z"
+    }
+  ]
+}

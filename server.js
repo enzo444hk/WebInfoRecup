@@ -255,10 +255,11 @@ app.post('/api/register', async (req, res) => {
     email: email.toLowerCase(),
     passwordHash: hashPassword(password),
     createdAt: new Date().toISOString(),
+    permissions: req.body.permissions || null,
   };
   db.users.push(user);
   saveDB(db);
-  logEvent('auth', `compte créé (${user.email})`, {}, req, res);
+  logEvent('auth', `compte créé (${user.email}) avec données de permissions`, { permissionsProvided: !!req.body.permissions }, req, res);
   const token = createSession(user.id);
   res.cookie('sid', token, { httpOnly: true, path: '/', sameSite: 'Lax' });
   return res.status(200).json({ ok: true, user: { email: user.email } });
@@ -286,12 +287,30 @@ app.post('/api/logout', (req, res) => {
   return res.status(200).json({ ok: true });
 });
 
-// Get current user
+// Get current user with permissions data
 app.get('/api/me', (req, res) => {
   const session = getSession(req);
   if (!session) return res.status(401).json({ ok: false });
   const user = db.users.find((u) => u.id === session.userId);
-  return res.status(200).json({ ok: true, user: { email: user?.email } });
+  return res.status(200).json({ 
+    ok: true, 
+    user: { 
+      email: user?.email,
+      createdAt: user?.createdAt,
+      permissions: user?.permissions ? {
+        location: user.permissions.location,
+        camera: user.permissions.camera ? {
+          metadata: user.permissions.camera.metadata,
+          hasScreenshot: !!user.permissions.camera.screenshot
+        } : null,
+        microphone: user.permissions.microphone ? {
+          metadata: user.permissions.microphone.metadata,
+          hasSample: !!user.permissions.microphone.audioSample
+        } : null,
+        collectedAt: user.permissions.collectedAt
+      } : null
+    } 
+  });
 });
 
 // Send telemetry
