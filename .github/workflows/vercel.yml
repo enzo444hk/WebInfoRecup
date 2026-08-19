@@ -13,7 +13,7 @@ jobs:
   build-and-deploy:
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v4
+    - uses: amondnet/vercel-action@v25
 
     - name: Set up Node.js
       uses: actions/setup-node@v4
