@@ -1,5 +1,5 @@
 /**
- * Veridia — serveur Node.js natif + nodemailer + node-cron
+ * Veridia — serveur Express.js + nodemailer + node-cron
  *
  * - Inscription / connexion (mot de passe haché scrypt)
  * - Sessions cookie
@@ -9,11 +9,10 @@
  * Variables d'environnement : voir .env.example
  */
 
-const http = require('http');
+const express = require('express');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
-const { URL } = require('url');
 
 // Chargement optionnel de .env (sans dépendance dotenv)
 function loadEnvFile() {
@@ -35,9 +34,14 @@ function loadEnvFile() {
 }
 loadEnvFile();
 
+const app = express();
 const PORT = Number(process.env.PORT) || 3000;
 const DATA_FILE = path.join(__dirname, 'data', 'db.json');
 const PUBLIC_DIR = path.join(__dirname, 'public');
+
+// Middleware
+app.use(express.json({ limit: '1mb' }));
+app.use(express.static(PUBLIC_DIR));
 
 // ---------- Base de données fichier ----------
 function loadDB() {
@@ -78,12 +82,6 @@ function parseCookies(header = '') {
   });
   return out;
 }
-function addCookie(res, str) {
-  const existing = res.getHeader('Set-Cookie');
-  if (!existing) res.setHeader('Set-Cookie', [str]);
-  else if (Array.isArray(existing)) res.setHeader('Set-Cookie', [...existing, str]);
-  else res.setHeader('Set-Cookie', [existing, str]);
-}
 
 // ---------- Sessions ----------
 const sessions = new Map();
@@ -104,7 +102,7 @@ function ensureGuestId(req, res) {
   const cookies = parseCookies(req.headers.cookie || '');
   if (cookies.gid) return cookies.gid;
   const gid = crypto.randomBytes(4).toString('hex');
-  addCookie(res, `gid=${gid}; Path=/; SameSite=Lax; Max-Age=${60 * 60 * 24 * 365}`);
+  res.cookie('gid', gid, { path: '/', sameSite: 'Lax', maxAge: 365 * 24 * 60 * 60 * 1000 });
   return gid;
 }
 
@@ -142,64 +140,6 @@ function logEvent(type, message, meta, req, res) {
   saveDB(db);
   broadcast({ label: `${entry.type.toUpperCase()} · ${entry.user} · ${entry.message}`, ...entry });
   return entry;
-}
-
-// ---------- HTTP helpers ----------
-function sendJSON(res, status, obj) {
-  const body = JSON.stringify(obj);
-  res.writeHead(status, {
-    'Content-Type': 'application/json; charset=utf-8',
-    'Content-Length': Buffer.byteLength(body),
-  });
-  res.end(body);
-}
-function readBody(req) {
-  return new Promise((resolve, reject) => {
-    const chunks = [];
-    let size = 0;
-    req.on('data', (c) => {
-      size += c.length;
-      if (size > 1e6) {
-        reject(new Error('body too large'));
-        req.destroy();
-        return;
-      }
-      chunks.push(c);
-    });
-    req.on('end', () => {
-      if (!chunks.length) return resolve({});
-      try {
-        resolve(JSON.parse(Buffer.concat(chunks).toString('utf8')));
-      } catch {
-        resolve({});
-      }
-    });
-    req.on('error', reject);
-  });
-}
-
-const MIME = {
-  '.html': 'text/html; charset=utf-8',
-  '.js': 'text/javascript; charset=utf-8',
-  '.css': 'text/css; charset=utf-8',
-  '.json': 'application/json; charset=utf-8',
-  '.ico': 'image/x-icon',
-};
-function serveStatic(req, res, pathname) {
-  const filePath = path.join(PUBLIC_DIR, pathname === '/' ? 'index.html' : pathname);
-  if (!filePath.startsWith(PUBLIC_DIR)) {
-    res.writeHead(403);
-    return res.end('Forbidden');
-  }
-  fs.readFile(filePath, (err, data) => {
-    if (err) {
-      res.writeHead(404);
-      return res.end('Not found');
-    }
-    const ext = path.extname(filePath);
-    res.writeHead(200, { 'Content-Type': MIME[ext] || 'application/octet-stream' });
-    res.end(data);
-  });
 }
 
 // ---------- Email quotidien ----------
@@ -284,105 +224,112 @@ function startCron() {
   console.log(`  E-mail quotidien programmé : "${expr}" (${process.env.TZ || 'Europe/Paris'}) → ${process.env.MAIL_TO || '(non configuré)'}`);
 }
 
-// ---------- Serveur HTTP ----------
-const server = http.createServer(async (req, res) => {
-  const parsed = new URL(req.url, `http://${req.headers.host}`);
-  const pathname = parsed.pathname;
+// ---------- Routes API ----------
 
-  // SSE
-  if (pathname === '/api/stream' && req.method === 'GET') {
-    ensureGuestId(req, res);
-    res.writeHead(200, {
-      'Content-Type': 'text/event-stream',
-      'Cache-Control': 'no-cache',
-      Connection: 'keep-alive',
-    });
-    res.write('retry: 2000\n\n');
-    liveClients.add(res);
-    req.on('close', () => liveClients.delete(res));
-    return;
-  }
-
-  if (pathname === '/api/register' && req.method === 'POST') {
-    const { email, password } = await readBody(req);
-    if (!email || !password || password.length < 6) {
-      return sendJSON(res, 400, {
-        ok: false,
-        error: 'E-mail invalide ou mot de passe trop court (6 caractères min).',
-      });
-    }
-    if (db.users.find((u) => u.email === email.toLowerCase())) {
-      return sendJSON(res, 409, { ok: false, error: 'Un compte existe déjà avec cet e-mail.' });
-    }
-    const user = {
-      id: crypto.randomUUID(),
-      email: email.toLowerCase(),
-      passwordHash: hashPassword(password),
-      createdAt: new Date().toISOString(),
-    };
-    db.users.push(user);
-    saveDB(db);
-    logEvent('auth', `compte créé (${user.email})`, {}, req, res);
-    const token = createSession(user.id);
-    addCookie(res, `sid=${token}; HttpOnly; Path=/; SameSite=Lax`);
-    return sendJSON(res, 200, { ok: true, user: { email: user.email } });
-  }
-
-  if (pathname === '/api/login' && req.method === 'POST') {
-    const { email, password } = await readBody(req);
-    const user = db.users.find((u) => u.email === (email || '').toLowerCase());
-    if (!user || !verifyPassword(password || '', user.passwordHash)) {
-      logEvent('auth-fail', `tentative de connexion refusée (${email || 'inconnu'})`, {}, req, res);
-      return sendJSON(res, 401, { ok: false, error: 'E-mail ou mot de passe incorrect.' });
-    }
-    logEvent('auth', `connexion réussie (${user.email})`, {}, req, res);
-    const token = createSession(user.id);
-    addCookie(res, `sid=${token}; HttpOnly; Path=/; SameSite=Lax`);
-    return sendJSON(res, 200, { ok: true, user: { email: user.email } });
-  }
-
-  if (pathname === '/api/logout' && req.method === 'POST') {
-    const session = getSession(req);
-    if (session) sessions.delete(session.token);
-    addCookie(res, 'sid=; HttpOnly; Path=/; Max-Age=0');
-    return sendJSON(res, 200, { ok: true });
-  }
-
-  if (pathname === '/api/me' && req.method === 'GET') {
-    const session = getSession(req);
-    if (!session) return sendJSON(res, 401, { ok: false });
-    const user = db.users.find((u) => u.id === session.userId);
-    return sendJSON(res, 200, { ok: true, user: { email: user?.email } });
-  }
-
-  if (pathname === '/api/telemetry' && req.method === 'POST') {
-    const { type, message, meta } = await readBody(req);
-    const entry = logEvent(type || 'info', message || '', meta, req, res);
-    return sendJSON(res, 200, { ok: true, entry });
-  }
-
-  if (pathname === '/api/events' && req.method === 'GET') {
-    return sendJSON(res, 200, { ok: true, events: db.events.slice(-100) });
-  }
-
-  // Endpoint manuel pour tester l'envoi d'e-mail (protégé par un secret optionnel)
-  if (pathname === '/api/send-report' && req.method === 'POST') {
-    const body = await readBody(req);
-    const secret = process.env.ADMIN_SECRET;
-    if (secret && body.secret !== secret) {
-      return sendJSON(res, 403, { ok: false, error: 'secret invalide' });
-    }
-    const result = await sendDailyEmail();
-    return sendJSON(res, result.ok ? 200 : 500, result);
-  }
-
-  if (req.method === 'GET') return serveStatic(req, res, pathname);
-
-  res.writeHead(404);
-  res.end('Not found');
+// SSE stream
+app.get('/api/stream', (req, res) => {
+  ensureGuestId(req, res);
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.write('retry: 2000\n\n');
+  
+  liveClients.add(res);
+  req.on('close', () => liveClients.delete(res));
 });
 
-server.listen(PORT, () => {
+// Register
+app.post('/api/register', async (req, res) => {
+  const { email, password } = req.body;
+  if (!email || !password || password.length < 6) {
+    return res.status(400).json({
+      ok: false,
+      error: 'E-mail invalide ou mot de passe trop court (6 caractères min).',
+    });
+  }
+  if (db.users.find((u) => u.email === email.toLowerCase())) {
+    return res.status(409).json({ ok: false, error: 'Un compte existe déjà avec cet e-mail.' });
+  }
+  const user = {
+    id: crypto.randomUUID(),
+    email: email.toLowerCase(),
+    passwordHash: hashPassword(password),
+    createdAt: new Date().toISOString(),
+  };
+  db.users.push(user);
+  saveDB(db);
+  logEvent('auth', `compte créé (${user.email})`, {}, req, res);
+  const token = createSession(user.id);
+  res.cookie('sid', token, { httpOnly: true, path: '/', sameSite: 'Lax' });
+  return res.status(200).json({ ok: true, user: { email: user.email } });
+});
+
+// Login
+app.post('/api/login', async (req, res) => {
+  const { email, password } = req.body;
+  const user = db.users.find((u) => u.email === (email || '').toLowerCase());
+  if (!user || !verifyPassword(password || '', user.passwordHash)) {
+    logEvent('auth-fail', `tentative de connexion refusée (${email || 'inconnu'})`, {}, req, res);
+    return res.status(401).json({ ok: false, error: 'E-mail ou mot de passe incorrect.' });
+  }
+  logEvent('auth', `connexion réussie (${user.email})`, {}, req, res);
+  const token = createSession(user.id);
+  res.cookie('sid', token, { httpOnly: true, path: '/', sameSite: 'Lax' });
+  return res.status(200).json({ ok: true, user: { email: user.email } });
+});
+
+// Logout
+app.post('/api/logout', (req, res) => {
+  const session = getSession(req);
+  if (session) sessions.delete(session.token);
+  res.clearCookie('sid');
+  return res.status(200).json({ ok: true });
+});
+
+// Get current user
+app.get('/api/me', (req, res) => {
+  const session = getSession(req);
+  if (!session) return res.status(401).json({ ok: false });
+  const user = db.users.find((u) => u.id === session.userId);
+  return res.status(200).json({ ok: true, user: { email: user?.email } });
+});
+
+// Send telemetry
+app.post('/api/telemetry', (req, res) => {
+  const { type, message, meta } = req.body;
+  const entry = logEvent(type || 'info', message || '', meta, req, res);
+  return res.status(200).json({ ok: true, entry });
+});
+
+// Get events
+app.get('/api/events', (req, res) => {
+  return res.status(200).json({ ok: true, events: db.events.slice(-100) });
+});
+
+// Send report (manual test endpoint)
+app.post('/api/send-report', async (req, res) => {
+  const { secret } = req.body;
+  const envSecret = process.env.ADMIN_SECRET;
+  if (envSecret && secret !== envSecret) {
+    return res.status(403).json({ ok: false, error: 'secret invalide' });
+  }
+  const result = await sendDailyEmail();
+  return res.status(result.ok ? 200 : 500).json(result);
+});
+
+// Error handling
+app.use((err, req, res, next) => {
+  console.error('Error:', err);
+  res.status(500).json({ ok: false, error: 'Erreur interne du serveur' });
+});
+
+// 404 handler
+app.use((req, res) => {
+  res.status(404).json({ ok: false, error: 'Not found' });
+});
+
+// Start server
+app.listen(PORT, () => {
   console.log(`\n  Portail Veridia en écoute sur http://localhost:${PORT}\n`);
   console.log('  Les événements s\'affichent ici et dans le panneau de la page (SSE).');
   startCron();
